@@ -41,10 +41,23 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         impl #builder_ident {
-             #( pub fn #field_idents (&mut self, #field_idents : #field_tys) -> &mut Self { 
+             #( pub fn #field_idents (&mut self, #field_idents : #field_tys) -> &mut Self {
                 self.#field_idents = Some(#field_idents);
                 self
             }) *
+
+            pub fn build(&mut self) -> Result<#name, Box<dyn std::error::Error>> {
+                #(
+                    if self.#field_idents.is_none() {
+                        return Err(format!("Field {} not initialized", stringify!(#field_idents)).into());
+                    }
+                )*
+                Ok(#name {
+                    #(
+                        #field_idents: std::mem::replace(&mut self.#field_idents, None).unwrap(),
+                    )*
+                })
+            }
         }
     };
 
