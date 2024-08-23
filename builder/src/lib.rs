@@ -1,39 +1,47 @@
 use core::panic;
 
-use proc_macro::TokenStream;
+use proc_macro::{Span, TokenStream};
 use quote::{format_ident, quote, ToTokens};
 use syn::{
-    parse_macro_input, parse_quote, AngleBracketedGenericArguments, Attribute, Data, DataStruct,
-    DeriveInput, Expr, ExprLit, Field, GenericArgument, Lit, Path, PathArguments, PathSegment,
-    Type, TypePath,
+    parse_macro_input, parse_quote, spanned::Spanned, AngleBracketedGenericArguments, Attribute, Data, DataStruct, DeriveInput, Expr, ExprLit, Field, GenericArgument, Lit, Meta, Path, PathArguments, PathSegment, Type, TypePath
 };
 
 // If there is an "#[builder(each = "...")] specified, return the name.
-fn match_vec_each(attr: &Vec<Attribute>) -> Option<String> {
-    if attr.len() != 1 {
-        return None;
+fn match_vec_each(attrs: &Vec<Attribute>) -> Result<Option<String>, syn::Error> {
+    if attrs.is_empty() {
+        return Ok(None);
     }
-    let attr = &attr[0];
+    let attr = &attrs[0];
+
+    let err = |span| Err(syn::Error::new(
+        span,
+        "expected `builder(each = \"...\")`",
+    ));
+
+    if attrs.len() != 1 {
+        return err(attr.span());
+    }
+
     if !attr.path().is_ident("builder") {
-        return None;
+        return err(attr.path().span());
     }
-    let Expr::Assign(assign) = attr.parse_args().ok()? else {
-        return None;
+    let Expr::Assign(assign) = attr.parse_args()? else {
+        return err(attr.span());
     };
 
-    let Expr::Path(path) = &*assign.left else {
-        return None;
+    let Expr::Path(lhs_path) = &*assign.left else {
+        return err(assign.span());
     };
-    if !path.path.is_ident("each") {
-        return None;
+    if !lhs_path.path.is_ident("each") {
+        return err(lhs_path.span());
     }
     let Expr::Lit(ExprLit {
         lit: Lit::Str(str), ..
     }) = &*assign.right
     else {
-        return None;
+        return err(assign.span());
     };
-    Some(str.value())
+    Ok(Some(str.value()))
 }
 
 #[proc_macro_derive(Builder, attributes(builder))]
@@ -108,7 +116,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 }
             }
             if is_vec {
-                if let Some(each_name) = match_vec_each(&field.attrs) {
+                let parsed_attr_opt = match match_vec_each(&field.attrs) {
+                    Ok(attr_opt) => attr_opt,
+                    Err(e) => return e.to_compile_error().into(),
+                };
+                if let Some(each_name) = parsed_attr_opt {
                     vec_each.push(Some(each_name));
                 } else {
                     vec_each.push(None);
@@ -125,7 +137,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     field_tys.push((ty.clone(), SpecialFieldTypes::Unknown));
                 }
                 // This is not an Option, so add Option wrapper.
-                let optioned_ty: Type = parse_quote! { Option<#ty> };
+                let optioned_ty: Type = parse_quote! { std::option::Option<#ty> };
                 *field = Field {
                     ty: optioned_ty,
                     ..field.clone()
@@ -143,7 +155,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl #name {
             fn builder() -> #builder_ident {
                 #builder_ident {
-                    #( #field_idents : None ), *
+                    #( #field_idents : std::option::Option::None ), *
                 }
             }
         }
@@ -178,13 +190,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
         let method = if generate_all_at_once {
             let arg_ty = if matches!(field_speciality, SpecialFieldTypes::Vec) {
-                parse_quote! { Vec<#field_ty> }
+                parse_quote! { std::vec::Vec<#field_ty> }
             } else {
                 field_ty
             };
             quote! {
                 pub fn #field_ident (&mut self, #field_ident : #arg_ty) -> &mut Self {
-                        self.#field_ident = Some(#field_ident);
+                        self.#field_ident = std::option::Option::Some(#field_ident);
                         self
                 }
             }
@@ -203,13 +215,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
             SpecialFieldTypes::Option => (
                 quote! {},
                 quote! {
-                    #field_ident: std::mem::replace(&mut self.#field_ident, None),
+                    #field_ident: std::mem::replace(&mut self.#field_ident, std::option::Option::None),
                 },
             ),
             SpecialFieldTypes::Vec => (
                 quote! {},
                 quote! {
-                    #field_ident: std::mem::replace(&mut self.#field_ident, None).unwrap_or(Vec::new()),
+                    #field_ident: std::mem::replace(&mut self.#field_ident, std::option::Option::None).unwrap_or(Vec::new()),
                 },
             ),
             SpecialFieldTypes::Unknown => (
@@ -219,7 +231,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     }
                 },
                 quote! {
-                    #field_ident: std::mem::replace(&mut self.#field_ident, None).unwrap(),
+                    #field_ident: std::mem::replace(&mut self.#field_ident, std::option::Option::None).unwrap(),
                 },
             ),
         };
@@ -227,7 +239,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         field_assigns.extend(assign);
     }
     let build_method = quote! {
-        pub fn build(&mut self) -> Result<#name, Box<dyn std::error::Error>> {
+        pub fn build(&mut self) -> std::result::Result<#name, std::boxed::Box<dyn std::error::Error>> {
             #uninit_checks
             Ok(#name {
                 #field_assigns
